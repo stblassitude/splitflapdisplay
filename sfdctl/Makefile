@@ -152,6 +152,7 @@ CFLAGS += -fshort-enums
 CFLAGS += -Wall
 CFLAGS += -Werror
 CFLAGS += -Wstrict-prototypes
+CFLAGS += -fno-strict-aliasing
 #CFLAGS += -mshort-calls
 #CFLAGS += -fno-unit-at-a-time
 #CFLAGS += -Wundef
@@ -600,6 +601,7 @@ clean_list :
 	$(REMOVE) $(SRC:.c=.d)
 	$(REMOVE) $(SRC:.c=.i)
 	$(REMOVEDIR) .dep
+	$(REMOVEDIR) $(OBJDIR)
 
 
 # Create object files directory
