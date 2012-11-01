@@ -6,11 +6,19 @@
 #include <avr/pgmspace.h>
 #include <avr/sleep.h>
 #include <util/delay.h>
+#include <util/twi.h>
+
+#include "twi.h"
+
+
+// generic buffer for TWI slave write
+volatile uint8_t twibuf[8];
 
 // 1 kHz with 1:64 prescaler
 #define ONEKILOHERTZTIMERSTART (F_CPU / 64 / 1000)
 
 static uint16_t heartbeat = 0;
+
 
 /*
  * Adjust the state of the heartbeat LED.
@@ -21,7 +29,7 @@ step_heartbeat_led(void)
 	heartbeat++;
 	if (heartbeat == 1) {
 		PORTD |= 1<<7;
-	} else if (heartbeat == 900) {
+	} else if (heartbeat == 500) {
 		PORTD &= ~(1<<7);
 	} else if (heartbeat == 1000) {
 		heartbeat = 0;
@@ -33,8 +41,10 @@ step_heartbeat_led(void)
  */
 ISR(TIMER2_COMP_vect)
 {
+	twi_step_timeout(1);
 	step_heartbeat_led();
 }
+
 
 /*
  * Sets up Timer/Counter 2 as a 1 kHz clock. WGM=2 (CTC), COM2=0 (OC2
@@ -45,7 +55,7 @@ setup_clock(void)
 {
 	TCNT2 = 0;
 	OCR2 = ONEKILOHERTZTIMERSTART;
-	TCCR2 = 0x0c;	// waeform generation mode 2, prescaler 1:64
+	TCCR2 = 0x0c;	// waveform generation mode 2, prescaler 1:64
 	TIMSK = 0x80;	// only interrupt on compare match of Counter2
 }
 
@@ -60,6 +70,28 @@ setup_pins(void)
 	PORTD = 0xff;
 }
 
+
+void
+twi_slave_read(volatile uint8_t *data)
+{
+}
+
+
+uint8_t
+twi_slave_read_prepare(uint8_t function)
+{
+	return 1;
+}
+
+
+uint8_t
+twi_slave_write(uint8_t function, volatile uint8_t **data)
+{
+	*data = twibuf;
+	twibuf[0] = 23;
+	return 1;
+}
+
 int
 main(void)
 {
@@ -67,6 +99,7 @@ main(void)
 
 	setup_clock();
 	setup_pins();
+	twi_setup();
 
 	/*
 	 * enter power saving state until woken by interrupt

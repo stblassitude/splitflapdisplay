@@ -11,6 +11,7 @@
 #include <util/delay.h>
 #include <util/twi.h>
 #include "usb_serial.h"
+#include "twi.h"
 
 #define LED_CONFIG	(DDRD |= (1<<6))
 #define LED_ON		(PORTD |= (1<<6))
@@ -21,25 +22,6 @@
 #define TWPS	(0)
 #define F_TWPS	(1 << (TWPS*2))
 
-typedef enum {
-	TWSTATUS_IDLE = 0,
-	TWSTATUS_ERROR,
-	TWSTATUS_SUCCESS,
-	TWSTATUS_START,
-	TWSTATUS_WAITSLA,
-	TWSTATUS_WAITDATA,
-	TWSTATUS_LAST,
-} twstatus_t;
-
-#define TWBUFFERSZ 70
-
-volatile twstatus_t twstatus;
-volatile uint8_t twsla;
-volatile uint8_t twbuffer[TWBUFFERSZ];
-volatile uint8_t twbufferidx;
-volatile uint8_t twbuffercnt;
-volatile uint8_t twsr;
-volatile uint8_t twtimeout;
 
 
 static void
@@ -66,186 +48,14 @@ send_str(const char *s, uint8_t len)
 	}
 }
 
-#define TW_DEBUG(x) tw_debug(PSTR(x));
 
-
-static void
-tw_debug(const char *pstr)
+#if defined(TWI_DEBUG)
+void
+debug_putchar(const char c)
 {
-	char s[80];
-	char *p;
-	char c;
-	
-	sprintf(s, "TW: cr=%02x sr=0x%02x st=%d idx=%d cnt=%d ", TWCR, twsr, 
-			twstatus, twbufferidx, twbuffercnt);
-	for (p=s; *p != '\0'; p++)
-		usb_serial_putchar(*p);
-	while ((c = pgm_read_byte(pstr++)))
-		usb_serial_putchar(c);
-	usb_serial_putchar('\r');
-	usb_serial_putchar('\n');
+	usb_serial_putchar(c);
 }
-
-#define TWCR_DFLT (_BV(TWINT) | _BV(TWEN) | _BV(TWIE))
-
-static inline void
-tw_start(void)
-{
-	TWCR = _BV(TWSTA) | _BV(TWEA) | _BV(TWINT) | _BV(TWEN) | _BV(TWIE);
-	TW_DEBUG("start");
-}
-
-
-static inline void
-tw_stop(void)
-{
-	TWCR = _BV(TWSTO) | TWCR_DFLT;
-}
-
-
-static inline void
-tw_transfer(void)
-{
-	TWCR = _BV(TWEA) | TWCR_DFLT;
-}
-
-static inline void
-tw_transfer_last(void)
-{
-	TWCR = TWCR_DFLT;
-}
-
-static void
-tw_final(twstatus_t s)
-{
-	twstatus = s;
-	twtimeout = 0;
-	tw_stop();
-	TW_DEBUG("final");
-}
-
-static inline uint8_t
-tw_status(void)
-{
-	return TW_STATUS;
-}
-
-static inline uint8_t
-tw_wait(void)
-{
-	while (twstatus != TWSTATUS_IDLE &&
-			twstatus != TWSTATUS_SUCCESS &&
-			twstatus != TWSTATUS_ERROR) {
-	}
-	return twstatus;
-}
-
-ISR(TWI_vect)
-{
-	twsr = tw_status();
-	switch(twstatus) {
-	case TWSTATUS_IDLE:
-	case TWSTATUS_SUCCESS:
-	case TWSTATUS_ERROR:
-		// unexpected bus activity, issue stop
-		twtimeout = 0;
-		tw_stop();
-		TW_DEBUG("error");
-		break;
-	case TWSTATUS_START:
-		// start sent
-		if (twsr == TW_START || twsr == TW_REP_START) {
-			TW_DEBUG("starting");
-			TWDR = twsla;
-			tw_transfer();
-			twstatus = TWSTATUS_WAITSLA;
-		} else {
-			tw_final(TWSTATUS_ERROR);
-		}
-		break;
-	case TWSTATUS_WAITSLA:
-		// slave is responding
-		switch (twsr) {
-		case TW_MR_SLA_ACK:
-			TW_DEBUG("MR SLA ack");
-			tw_transfer(); // XXX min read size 1
-			twstatus = TWSTATUS_WAITDATA;
-			break;
-		case TW_MT_SLA_ACK:
-			TW_DEBUG("MT SLA ack");
-			if (twbufferidx < twbuffercnt) {
-				TWDR = twbuffer[twbufferidx++];
-				tw_transfer();
-				twstatus = TWSTATUS_WAITDATA;
-			} else {
-				tw_final(TWSTATUS_SUCCESS);
-			}
-			break;
-		default:
-			TW_DEBUG("no ack");
-			tw_final(TWSTATUS_ERROR);
-		}
-		break;
-	case TWSTATUS_WAITDATA: 
-		// send/receive (more) data
-		switch (twsr) {
-		case TW_MR_DATA_ACK:
-			TW_DEBUG("MR ack");
-			twbuffer[twbufferidx++] = TWDR;
-			if (twbufferidx < twbuffercnt) {
-				tw_transfer();
-			} else {
-				tw_transfer_last();
-				twstatus = TWSTATUS_LAST;
-			}
-			break;
-		case TW_MT_DATA_ACK:
-			TW_DEBUG("MT ack");
-			if (twbufferidx < twbuffercnt) {
-				TWDR = twbuffer[twbufferidx++];
-				tw_transfer();
-			} else {
-				tw_final(TWSTATUS_SUCCESS);
-			}
-			break;
-		case TW_MT_DATA_NACK:
-			TW_DEBUG("MT Nack");
-			twbuffercnt = twbufferidx;
-			tw_final(TWSTATUS_SUCCESS);
-			break;
-		default:
-			TW_DEBUG("r/w error");
-			tw_final(TWSTATUS_ERROR);
-		}
-		break;
-	case TWSTATUS_LAST: 
-		// received last byte
-		switch (twsr) {
-		case TW_MR_DATA_NACK:
-			TW_DEBUG("completed");
-			tw_final(TWSTATUS_SUCCESS);
-			break;
-		default:
-			TW_DEBUG("read error");
-			tw_final(TWSTATUS_ERROR);
-		}
-		break;
-	}
-}
-
-
-static inline void
-step_tw_timeout(void)
-{
-	if (twtimeout == 0)
-		return;
-	if (--twtimeout == 0) {
-		TW_DEBUG("timeout");
-		twstatus = TWSTATUS_ERROR;
-		tw_stop();
-	}
-}
-
+#endif
 
 // 1 kHz with 1:64 prescaler
 #define ONEKILOHERTZTIMERSTART (F_CPU / 64 / 1000)
@@ -274,7 +84,7 @@ step_heartbeat_led(void)
 ISR(TIMER0_COMPA_vect)
 {
 	step_heartbeat_led();
-	step_tw_timeout();
+	twi_step_timeout(1);
 }
 
 /*
@@ -289,17 +99,6 @@ setup_clock(void)
 	TCCR0A = 0x02;	// waveform generation mode 2
 	TCCR0B = 0x03; // prescaler 1:64
 	TIMSK0 = _BV(OCIE0A);	// only interrupt on compare match of Counter0
-}
-
-
-static void
-setup_twi(void)
-{
-	// F_SCL = F_CPU / (16 + 2*TWBR * F_TWPS)
-	TWBR = ((F_CPU / F_SCL) - 16 ) / (2 * F_TWPS);
-	TWSR = TWPS;
-	//TWAR = 0x80;
-	//TWAMR = 0; // all address bits must match
 }
 
 
@@ -346,45 +145,66 @@ recv_str(char *buf, uint8_t size)
 }
 
 
+void
+twi_slave_read(volatile uint8_t *data)
+{
+}
+
+
+uint8_t
+twi_slave_read_prepare(uint8_t function)
+{
+	return 1;
+}
+
+
+uint8_t
+twi_slave_write(uint8_t function, volatile uint8_t **data)
+{
+	return 0;
+}
+
+
 // parse a user command and execute it, or print an error message
 //
 static void
 parse_and_execute_command(const char *buf, uint8_t num)
 {
 	char s[80];
+	volatile uint8_t twidata[2];
 	if (num == 0)
 		return;
 		
 	if (num == 1) {
 		switch(buf[0]) {
-		case 'w':
-			send_pstr(PSTR("TWI writing pointer=0\n"));
-			twsla = 0x9e;
-			twbuffer[0] = 0;
-			twbuffercnt = 1;
-			twbufferidx = 0;
-			twtimeout = 255;
-			twstatus = TWSTATUS_START;
-			cli();
-			tw_start();
-			sei();
-			if (tw_wait() != TWSTATUS_SUCCESS) {
+		case 't':
+			send_pstr(PSTR("LM75 set pointer=0\n"));
+			twidata[0] = 0;
+			twi_readwrite(0x9e, TW_WRITE, twidata, 1);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error writing pointer\n"));
 				return;
 			}
-			send_pstr(PSTR("\nTWI reading temp.\n"));
-			twsla = 0x9f;
-			twbuffercnt = 2;
-			twbufferidx = 0;
-			twtimeout = 255;
-			twstatus = TWSTATUS_START;
-			cli();
-			tw_start();
-			sei();
-			tw_wait();
+			send_pstr(PSTR("LM75 reading temp.\n"));
+			twi_readwrite(0x9e, TW_READ, twidata, 2);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error reading temp\n"));
+			} else {
+				sprintf(s, "temp = %d\n", twidata[0]);
+				send_str(s, strlen(s));
+			}
 			send_pstr(PSTR("\nTWI test done.\n"));
-			sprintf(s, "temp = %d\n", twbuffer[0]);
-			send_str(s, strlen(s));
+			return;
+		case 'r':
+			send_pstr(PSTR("read sfdio.\n"));
+			twi_readwrite(0x80, TW_READ, twidata, 1);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error reading sfdio\n"));
+			} else {
+				sprintf(s, "sfdio = %d\n", twidata[0]);
+				send_str(s, strlen(s));
+			}
+			send_pstr(PSTR("\nread sfdio done.\n"));
 			return;
 		}
 	}
@@ -406,7 +226,7 @@ main(void)
 	CPU_PRESCALE(0);
 	LED_CONFIG;
 	LED_ON;
-	setup_twi();
+	twi_setup();
 	setup_clock();
 	sei();
 

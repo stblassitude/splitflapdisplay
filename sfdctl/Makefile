@@ -43,11 +43,13 @@
 # Target file name (without extension).
 TARGET = sfdctl
 
-VPATH = ../usb_serial
+VPATH = ../usb_serial \
+	../twi \
 
 # List C source files here. (C dependencies are automatically generated.)
 SRC =	$(TARGET).c \
 	usb_serial.c \
+	twi.c \
 
 
 # MCU name, you MUST set this to match the board you are using
@@ -108,7 +110,8 @@ DEBUG = dwarf-2
 #     Each directory must be seperated by a space.
 #     Use forward slashes for directory separators.
 #     For a directory that has spaces, enclose it in quotes.
-EXTRAINCDIRS = ../usb_serial
+EXTRAINCDIRS = ../usb_serial \
+	../twi \
 
 
 # Compiler flag to set the C Standard level.
@@ -142,6 +145,7 @@ CPPDEFS = -DF_CPU=$(F_CPU)UL
 #  -Wa,...:      tell GCC to pass this to the assembler.
 #    -adhlns...: create assembler listing
 CFLAGS = -g$(DEBUG)
+CFLAGS += -DTWI_DEBUG
 CFLAGS += $(CDEFS)
 CFLAGS += -O$(OPT)
 CFLAGS += -funsigned-char
