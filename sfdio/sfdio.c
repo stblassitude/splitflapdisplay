@@ -33,16 +33,16 @@
 #include <util/twi.h>
 
 #include "twi.h"
+#include "sfd.h"
 
-
-// generic buffer for TWI slave write
-volatile uint8_t twibuf[8];
 
 // 1 kHz with 1:64 prescaler
 #define ONEKILOHERTZTIMERSTART (F_CPU / 64 / 1000)
 
-static uint16_t heartbeat = 0;
+char identify_string[] PROGMEM = "sfdio56789abcdef";
 
+static uint16_t heartbeat = 0;
+static volatile uint8_t dummy = 123;
 
 /*
  * Adjust the state of the heartbeat LED.
@@ -86,7 +86,7 @@ setup_clock(void)
 static void
 setup_pins(void)
 {
-	DDRB = 0;
+	DDRB = _BV(1);
 	DDRC = 0;
 	DDRD = 1<<7;
 	PORTB = 0xff;
@@ -96,24 +96,47 @@ setup_pins(void)
 
 
 void
-twi_slave_read(volatile uint8_t *data)
+twi_slave_read(uint8_t function, uint8_t size)
 {
+	switch (function) {
+	case SFDF_IDENTIFY:
+		break;
+	case SFDF_BYTE:
+		if (size > 0) {
+			dummy = twi_data[0];
+			PORTB &= ~_BV(1);
+		}
+		break;
+	}
 }
 
 
 uint8_t
 twi_slave_read_prepare(uint8_t function)
 {
+	switch (function) {
+	case SFDF_IDENTIFY:
+		return 8;
+	case SFDF_BYTE:
+		return 1;
+	}
 	return 1;
 }
 
 
 uint8_t
-twi_slave_write(uint8_t function, volatile uint8_t **data)
+twi_slave_write(uint8_t function)
 {
-	*data = twibuf;
-	twibuf[0] = 23;
-	return 1;
+	switch (function) {
+	case SFDF_IDENTIFY:
+		strcpy_P((char *)twi_data, identify_string);
+		return strlen_P(identify_string) + 1;
+	case SFDF_BYTE:
+		twi_data[0] = dummy;
+		PORTB |= _BV(1);
+		return 1;
+	}
+	return 0;
 }
 
 int

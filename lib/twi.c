@@ -40,14 +40,13 @@
 
 volatile twi_status_t _twi_status;
 volatile uint8_t _twi_sla;
-volatile uint8_t *_twi_data;
 volatile uint16_t _twi_idx;
 volatile uint16_t _twi_dsz;
 volatile uint8_t _twi_twsr;
 volatile uint8_t _twi_timeout;
-
-volatile uint8_t _twi_buffer[8]; // XXX: buffer size is application dependant
 volatile uint8_t _twi_function;
+
+volatile uint8_t twi_data[64]; // falsh page size
 
 #if defined(TWI_DEBUG)
 #define TW_DEBUG(x) _twi_debug(PSTR(x));
@@ -102,6 +101,16 @@ _twi_transfer_last(void)
 	TWCR = TWCR_DFLT;
 }
 
+static inline void
+_twi_transfer_next(void)
+{
+	if (_twi_idx < _twi_dsz) {
+		_twi_transfer();
+	} else {
+		_twi_transfer_last();
+	}
+}
+
 static void
 _twi_final(twi_status_t s)
 {
@@ -129,25 +138,17 @@ ISR(TWI_vect)
 		switch (_twi_twsr) {
 		case TW_SR_SLA_ACK:
 		case TW_SR_GCALL_ACK:
-			_twi_data = _twi_buffer;
-			_twi_dsz = sizeof(_twi_buffer);
+			_twi_dsz = sizeof(twi_data);
 			_twi_idx = 0;
-			if (_twi_idx < _twi_dsz) {
-				_twi_transfer();
-			} else {
-				_twi_transfer_last();
-			}
-			_twi_status = TWI_STATUS_WAITDATA;
+			_twi_timeout = 255;
+			_twi_transfer();
+			_twi_status = TWI_STATUS_START;
 			break;
 		case TW_ST_SLA_ACK:
-			_twi_dsz = twi_slave_write(_twi_function, &_twi_data);
+			_twi_dsz = twi_slave_write(_twi_function);
 			_twi_idx = 0;
-			TWDR = _twi_data[_twi_idx++];
-			if (_twi_idx < _twi_dsz) {
-				_twi_transfer();
-			} else {
-				_twi_transfer_last();
-			}
+			TWDR = twi_data[_twi_idx++];
+			_twi_transfer_next();
 			_twi_status = TWI_STATUS_WAITDATA;
 			break;
 		default:
@@ -158,13 +159,24 @@ ISR(TWI_vect)
 		}
 		break;
 	case TWI_STATUS_START:
-		// start sent
-		if (_twi_twsr == TW_START || _twi_twsr == TW_REP_START) {
+		switch(_twi_twsr) {
+		case TW_START:
+		case TW_REP_START:
 			TW_DEBUG("starting");
 			TWDR = _twi_sla;
 			_twi_transfer();
 			_twi_status = TWI_STATUS_WAITSLA;
-		} else {
+			break;
+		case TW_SR_DATA_ACK:
+		case TW_SR_DATA_NACK:
+		case TW_SR_GCALL_DATA_ACK:
+		case TW_SR_GCALL_DATA_NACK:
+			_twi_function = TWDR;
+			_twi_dsz = twi_slave_read_prepare(_twi_function);
+			_twi_transfer_next();
+			_twi_status = TWI_STATUS_WAITDATA;
+			break;
+		default:
 			_twi_final(TWI_STATUS_ERROR);
 		}
 		break;
@@ -179,7 +191,7 @@ ISR(TWI_vect)
 		case TW_MT_SLA_ACK:
 			TW_DEBUG("MT SLA ack");
 			if (_twi_idx < _twi_dsz) {
-				TWDR = _twi_data[_twi_idx++];
+				TWDR = twi_data[_twi_idx++];
 				_twi_transfer();
 				_twi_status = TWI_STATUS_WAITDATA;
 			} else {
@@ -196,7 +208,7 @@ ISR(TWI_vect)
 		switch (_twi_twsr) {
 		case TW_MR_DATA_ACK:
 			TW_DEBUG("MR ack");
-			_twi_data[_twi_idx++] = TWDR;
+			twi_data[_twi_idx++] = TWDR;
 			if (_twi_idx < _twi_dsz) {
 				_twi_transfer();
 			} else {
@@ -207,7 +219,7 @@ ISR(TWI_vect)
 		case TW_MT_DATA_ACK:
 			TW_DEBUG("MT ack");
 			if (_twi_idx < _twi_dsz) {
-				TWDR = _twi_data[_twi_idx++];
+				TWDR = twi_data[_twi_idx++];
 				_twi_transfer();
 			} else {
 				_twi_final(TWI_STATUS_SUCCESS);
@@ -222,33 +234,23 @@ ISR(TWI_vect)
 		case TW_SR_DATA_NACK:
 		case TW_SR_GCALL_DATA_ACK:
 		case TW_SR_GCALL_DATA_NACK:
-			if (_twi_idx == 0) {
-				_twi_function = TWDR;
-				_twi_data[_twi_idx++] = _twi_function;
-				_twi_dsz = twi_slave_read_prepare(_twi_function);
-			} else {
-				if (_twi_idx < _twi_dsz)
-					_twi_data[_twi_idx++] = TWDR;
-			}
-			if (_twi_idx < _twi_dsz) {
-				_twi_transfer();
-			} else {
-				_twi_transfer_last();
-			}
+			if (_twi_idx < _twi_dsz)
+				twi_data[_twi_idx++] = TWDR;
+			_twi_transfer_next();
 			break;
 		case TW_SR_STOP:
 			_twi_status = TWI_STATUS_SUCCESS;
 			_twi_timeout = 0;
 			TWCR = TWCR_DFLT | _BV(TWEA);
-			twi_slave_read(_twi_data);
+			twi_slave_read(_twi_function, _twi_idx+1);
 			break;
 		case TW_ST_DATA_ACK:
 			if (_twi_idx < _twi_dsz) {
-				TWDR = _twi_data[_twi_idx++];
-				_twi_transfer();
+				TWDR = twi_data[_twi_idx++];
 			} else {
-				_twi_transfer_last();
+				TWDR = 0;
 			}
+			_twi_transfer_next();
 			break;
 		case TW_ST_DATA_NACK:
 		case TW_ST_LAST_DATA:
@@ -312,13 +314,12 @@ twi_setup(void)
 
 
 void
-twi_readwrite(uint8_t sla, uint8_t readwrite, volatile uint8_t *data, uint16_t size)
+twi_readwrite(uint8_t sla, uint8_t readwrite, uint16_t size)
 {
 	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 		if (_twi_status != TWI_STATUS_SUCCESS &&
 				_twi_status != TWI_STATUS_ERROR)
 			break;
-		_twi_data = data;
 		_twi_dsz = size;
 		_twi_idx = 0;
 		_twi_sla = (sla & (~TW_READ)) | readwrite;

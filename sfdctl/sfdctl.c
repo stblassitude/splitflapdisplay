@@ -34,7 +34,9 @@
 #include <util/delay.h>
 #include <util/twi.h>
 #include "usb_serial.h"
+
 #include "twi.h"
+#include "sfd.h"
 
 #define LED_CONFIG	(DDRD |= (1<<6))
 #define LED_ON		(PORTD |= (1<<6))
@@ -169,7 +171,7 @@ recv_str(char *buf, uint8_t size)
 
 
 void
-twi_slave_read(volatile uint8_t *data)
+twi_slave_read(uint8_t function, uint8_t size)
 {
 }
 
@@ -182,7 +184,7 @@ twi_slave_read_prepare(uint8_t function)
 
 
 uint8_t
-twi_slave_write(uint8_t function, volatile uint8_t **data)
+twi_slave_write(uint8_t function)
 {
 	return 0;
 }
@@ -194,40 +196,80 @@ static void
 parse_and_execute_command(const char *buf, uint8_t num)
 {
 	char s[80];
-	volatile uint8_t twidata[2];
 	if (num == 0)
 		return;
 		
 	if (num == 1) {
 		switch(buf[0]) {
+		case 'i':
+			twi_data[0] = SFDF_IDENTIFY;
+			twi_readwrite(0x80, TW_WRITE, 1);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error writing sfdio\n"));
+			}
+			twi_readwrite(0x80, TW_READ, 20);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error reading sfdio\n"));
+			} else {
+				sprintf(s, "identify: %s\n", twi_data);
+				send_str(s, strlen(s));
+				for (uint8_t i = 0; i < 20; i++) {
+					sprintf(s, "%02x ", twi_data[i]);
+					send_str(s, strlen(s));
+				}
+				send_pstr(PSTR("\n"));
+			}
+			return;
 		case 't':
 			send_pstr(PSTR("LM75 set pointer=0\n"));
-			twidata[0] = 0;
-			twi_readwrite(0x9e, TW_WRITE, twidata, 1);
+			twi_data[0] = 0;
+			twi_readwrite(0x9e, TW_WRITE, 1);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error writing pointer\n"));
 				return;
 			}
 			send_pstr(PSTR("LM75 reading temp.\n"));
-			twi_readwrite(0x9e, TW_READ, twidata, 2);
+			twi_readwrite(0x9e, TW_READ, 2);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error reading temp\n"));
 			} else {
-				sprintf(s, "temp = %d\n", twidata[0]);
+				sprintf(s, "temp = %d\n", twi_data[0]);
 				send_str(s, strlen(s));
 			}
 			send_pstr(PSTR("\nTWI test done.\n"));
 			return;
 		case 'r':
 			send_pstr(PSTR("read sfdio.\n"));
-			twi_readwrite(0x80, TW_READ, twidata, 1);
+			twi_readwrite(0x80, TW_READ, 1);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error reading sfdio\n"));
 			} else {
-				sprintf(s, "sfdio = %d\n", twidata[0]);
+				sprintf(s, "sfdio = %d\n", twi_data[0]);
 				send_str(s, strlen(s));
 			}
 			send_pstr(PSTR("\nread sfdio done.\n"));
+			return;
+		case 'u':
+			twi_data[0] = SFDF_BYTE;
+			twi_readwrite(0x80, TW_WRITE, 1);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error writing sfdio\n"));
+			}
+			send_pstr(PSTR("update sfdio.\n"));
+			twi_readwrite(0x80, TW_READ, 1);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error reading sfdio\n"));
+			} else {
+				sprintf(s, "sfdio = %d\n", twi_data[0]);
+				send_str(s, strlen(s));
+			}
+			twi_data[1] = twi_data[0] + 1;
+			twi_data[0] = SFDF_BYTE;
+			twi_readwrite(0x80, TW_WRITE, 2);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error writing sfdio\n"));
+			}
+			send_pstr(PSTR("\nupdate sfdio done.\n"));
 			return;
 		}
 	}
