@@ -26,24 +26,32 @@
  */
 
 #include <string.h>
+#include <avr/boot.h>
+#include <avr/eeprom.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
 #include <avr/sleep.h>
+#include <avr/wdt.h>
+#include <util/atomic.h>
 #include <util/delay.h>
 #include <util/twi.h>
 
 #include "twi.h"
 #include "sfd.h"
+#include "twiboot.h"
 
 
 // 1 kHz with 1:64 prescaler
 #define ONEKILOHERTZTIMERSTART (F_CPU / 64 / 1000)
 
+#define FLASHPAGESIZE (64)
+
 static char identify_string[] = "twiboot r0";
 
-static uint16_t heartbeat = 0;
-static volatile uint8_t dummy;
+static volatile uint16_t heartbeat = 0;
+static volatile uint8_t eepromaddr;
+static volatile uint8_t flashpage;
 static volatile uint8_t mainloop;
 
 /*
@@ -85,6 +93,10 @@ setup_clock(void)
 	TIMSK = 0x80;	// only interrupt on compare match of Counter2
 }
 
+
+/*
+ * Initialize all pins. B1 and D7 have LEDs on them.
+ */
 static void
 setup_pins(void)
 {
@@ -97,48 +109,95 @@ setup_pins(void)
 }
 
 
-void
-twi_slave_read(uint8_t function, uint8_t size)
-{
-	switch (function) {
-	case SFDF_IDENTIFY:
-		break;
-	case SFDF_BYTE:
-		if (size > 0) {
-			dummy = twi_data[0];
-			_delay_ms(10);
-			PORTB ^= _BV(1);
-		}
-		break;
-	}
-}
-
-
+/*
+ * Inform caller how much data can be handled in response to master write request.
+ */
 uint8_t
-twi_slave_read_prepare(uint8_t function)
+twi_prep_write(uint8_t function)
 {
 	switch (function) {
-	case SFDF_IDENTIFY:
-		return 8;
-	case SFDF_BYTE:
-		return 1;
+		case TWIBOOT_EEPROM:
+		case TWIBOOT_FLASH:
+			return sizeof(twi_data);
 	}
 	return 1;
 }
 
 
-uint8_t
-twi_slave_write(uint8_t function)
+/*
+ * Perform action with received data.
+ */
+void
+twi_handle_write(uint8_t function, uint8_t size)
 {
 	switch (function) {
-	case SFDF_IDENTIFY:
+	case TWIBOOT_IDENTIFY:
+		break;
+	case TWIBOOT_STATUS:
+		break;
+	case TWIBOOT_FLASH:
+		if (size >= 1)
+			flashpage = twi_data[0];
+		if (size == FLASHPAGESIZE + 1) {
+			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+				eeprom_busy_wait();
+				boot_page_erase(flashpage * FLASHPAGESIZE);
+				boot_spm_busy_wait();
+				for (uint8_t i = 0; i < FLASHPAGESIZE; i += 2) {
+					uint16_t w;
+					w = twi_data[i+1];
+					w |= twi_data[i+2] << 8;
+					boot_page_fill(flashpage * FLASHPAGESIZE + i, w);
+				}
+				boot_page_write(flashpage * FLASHPAGESIZE);
+				boot_spm_busy_wait();
+				boot_rww_enable();
+			}
+		}
+		break;
+	case TWIBOOT_EEPROM:
+		if (size >= 1)
+			eepromaddr = twi_data[0];
+		if (size >= 2) {
+			size--;
+			for (uint8_t i = 0; i < size; i++) {
+				PORTB ^= _BV(1);
+				eeprom_write_byte((uint8_t *)(eepromaddr+i), twi_data[i+1]);
+			}
+		}
+		break;
+	case TWIBOOT_REBOOT:
+		mainloop = 0;
+		break;
+	}
+}
+
+
+/*
+ * Supply data in response to read request from master.
+ */
+uint8_t
+twi_handle_read(uint8_t function)
+{
+	switch (function) {
+	case TWIBOOT_IDENTIFY:
 		strcpy((char *)twi_data, identify_string);
 		return strlen((char *)twi_data) + 1;
-	case SFDF_BYTE:
-		twi_data[0] = dummy;
-		_delay_ms(10);
+	case TWIBOOT_STATUS:
+		twi_data[0] = eepromaddr;
 		PORTB ^= _BV(1);
 		return 1;
+	case TWIBOOT_FLASH:
+		for (uint8_t i = 0; i < sizeof(twi_data); i++) {
+			twi_data[i] = pgm_read_byte((uint8_t *)((uint16_t)flashpage * FLASHPAGESIZE + i));
+		}
+		return sizeof(twi_data);
+	case TWIBOOT_EEPROM:
+		for (uint8_t i = 0; i < sizeof(twi_data); i++)
+			twi_data[i] = eeprom_read_byte((uint8_t *)(eepromaddr+i));
+		return sizeof(twi_data);
+	case TWIBOOT_REBOOT:
+		return 0;
 	default:
 		twi_data[0] = function;
 		return 1;
@@ -149,29 +208,39 @@ twi_slave_write(uint8_t function)
 int
 main(void)
 {
-	cli();
+	if ((MCUCSR & _BV(EXTRF)) == 0) {
+		// no external reset, jump to application
+		asm("RJMP __vectors");
+	}
+
 	// relocate interrupt vectors to boot section
 	GICR = (1<<IVCE);
 	GICR = (1<<IVSEL);
+
+	_delay_ms(500);
 
 	setup_pins();
 	setup_clock();
 	twi_setup();
 
-	dummy = 12;
-		
 	sei();
 	
 	/*
 	 * enter power saving state until woken by interrupt
 	 */	
-	while(1) {
+	mainloop = 1;
+	while(mainloop) {
 		set_sleep_mode(1); // ADC noise reduction
 		sleep_enable();
 		sei();
 		sleep_cpu();
 		sleep_disable();
 		cli();
+	}
+	// perform a watchdog reset
+	wdt_enable(WDTO_15MS);
+	while(1) {
+		// forever
 	}
 }
 

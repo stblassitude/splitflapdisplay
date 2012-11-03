@@ -96,7 +96,7 @@ setup_pins(void)
 
 
 void
-twi_slave_read(uint8_t function, uint8_t size)
+twi_handle_write(uint8_t function, uint8_t size)
 {
 	switch (function) {
 	case SFDF_IDENTIFY:
@@ -112,7 +112,7 @@ twi_slave_read(uint8_t function, uint8_t size)
 
 
 uint8_t
-twi_slave_read_prepare(uint8_t function)
+twi_prep_write(uint8_t function)
 {
 	switch (function) {
 	case SFDF_IDENTIFY:
@@ -125,7 +125,7 @@ twi_slave_read_prepare(uint8_t function)
 
 
 uint8_t
-twi_slave_write(uint8_t function)
+twi_handle_read(uint8_t function)
 {
 	switch (function) {
 	case SFDF_IDENTIFY:

@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <avr/eeprom.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
@@ -47,7 +48,7 @@ volatile uint8_t _twi_twsr;
 volatile uint8_t _twi_timeout;
 volatile uint8_t _twi_function;
 
-volatile uint8_t twi_data[64]; // flash page size
+volatile uint8_t twi_data[64+2]; // flash page size
 
 #if defined(TWI_DEBUG)
 #define TW_DEBUG(x) _twi_debug(PSTR(x));
@@ -78,7 +79,7 @@ _twi_debug(const char *pstr)
 static inline void
 _twi_start(void)
 {
-	TWCR = _BV(TWSTA) | _BV(TWEA) | _BV(TWINT) | _BV(TWEN) | _BV(TWIE);
+	TWCR = _BV(TWSTA) | _BV(TWEA) | TWCR_DFLT;
 	TW_DEBUG("start");
 }
 
@@ -146,7 +147,7 @@ ISR(TWI_vect)
 			_twi_status = TWI_STATUS_START;
 			break;
 		case TW_ST_SLA_ACK:
-			_twi_dsz = twi_slave_write(_twi_function);
+			_twi_dsz = twi_handle_read(_twi_function);
 			_twi_idx = 0;
 			_twi_timeout = TWI_TIMEOUT;
 			TWDR = twi_data[_twi_idx++];
@@ -174,7 +175,7 @@ ISR(TWI_vect)
 		case TW_SR_GCALL_DATA_ACK:
 		case TW_SR_GCALL_DATA_NACK:
 			_twi_function = TWDR;
-			_twi_dsz = twi_slave_read_prepare(_twi_function);
+			_twi_dsz = twi_prep_write(_twi_function);
 			_twi_transfer_next();
 			_twi_status = TWI_STATUS_WAITDATA;
 			break;
@@ -244,7 +245,7 @@ ISR(TWI_vect)
 			_twi_status = TWI_STATUS_SUCCESS;
 			_twi_timeout = 0;
 			TWCR = TWCR_DFLT | _BV(TWEA);
-			twi_slave_read(_twi_function, _twi_idx);
+			twi_handle_write(_twi_function, _twi_idx);
 			break;
 		case TW_ST_DATA_ACK:
 			if (_twi_idx < _twi_dsz) {
@@ -306,7 +307,7 @@ twi_setup(void)
 		// F_SCL = F_CPU / (16 + 2*TWBR * F_TWPS)
 		TWBR = ((F_CPU / F_SCL) - 16 ) / (2 * F_TWPS);
 		TWSR = TWPS;
-		TWAR = 0x80;	// configurable
+		TWAR = eeprom_read_byte(TWI_EEPROM_SLA);
 		TWCR = TWCR_DFLT | _BV(TWEA);
 #if defined(TWAMR)
 		TWAMR = 0; // all address bits must match
@@ -316,7 +317,7 @@ twi_setup(void)
 
 
 void
-twi_readwrite(uint8_t sla, uint8_t readwrite, uint16_t size)
+twi_xfer(uint8_t sla, uint8_t readwrite, uint16_t size)
 {
 	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 		if (_twi_status != TWI_STATUS_SUCCESS &&
@@ -331,8 +332,24 @@ twi_readwrite(uint8_t sla, uint8_t readwrite, uint16_t size)
 	}	
 }
 
+
 twi_status_t
 twi_wait(void)
 {
 	return _twi_wait();
 }
+
+
+int
+twi_writeread(uint8_t sla, uint8_t wrsz, uint8_t rdsz)
+{
+	twi_xfer(sla, TW_WRITE, wrsz);
+	if (twi_wait() != TWI_STATUS_SUCCESS)
+		return -1;
+	twi_xfer(sla, TW_READ, rdsz);
+	if (twi_wait() != TWI_STATUS_SUCCESS)
+		return -2;
+	return _twi_idx;
+}
+
+

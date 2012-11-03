@@ -36,6 +36,7 @@
 #include "usb_serial.h"
 
 #include "twi.h"
+#include "twiboot.h"
 #include "sfd.h"
 
 #define LED_CONFIG	(DDRD |= (1<<6))
@@ -47,6 +48,8 @@
 #define TWPS	(0)
 #define F_TWPS	(1 << (TWPS*2))
 
+
+static uint8_t sla = 0xfe;
 
 
 static void
@@ -170,23 +173,55 @@ recv_str(char *buf, uint8_t size)
 }
 
 
-void
-twi_slave_read(uint8_t function, uint8_t size)
-{
-}
-
-
 uint8_t
-twi_slave_read_prepare(uint8_t function)
+twi_prep_write(uint8_t function)
 {
 	return 1;
 }
 
 
+void
+twi_handle_write(uint8_t function, uint8_t size)
+{
+}
+
+
 uint8_t
-twi_slave_write(uint8_t function)
+twi_handle_read(uint8_t function)
 {
 	return 0;
+}
+
+
+static inline int
+hexdigit(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	else if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	else if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	else
+		return -1;
+}
+
+
+static int
+hexbyte(const char *p)
+{
+	uint8_t r = 0;
+	int i;
+
+	i = hexdigit(*p++);
+	if (i < 0)
+		return -1;
+	r = (uint8_t)i << 4;	
+	i = hexdigit(*p++);
+	if (i < 0)
+		return -1;
+	r |= (uint8_t)i;
+	return r;
 }
 
 
@@ -196,72 +231,144 @@ static void
 parse_and_execute_command(const char *buf, uint8_t num)
 {
 	char s[80];
+	int d;
 	if (num == 0)
 		return;
 		
-	if (num == 1) {
+	if (num >= 1) {
 		switch(buf[0]) {
+		case '=':
+			// set SLA
+			if (num < 3) {
+				send_pstr(PSTR("error: format is =xx\n"));
+				return;
+			}
+			d = hexbyte(buf+1);
+			if (d < 0) {
+				send_pstr(PSTR("error: illegal hex addr\n"));
+				return;
+			}
+			sla = d;
+			sprintf(s, "SLA=%02x\n", sla);
+			send_str(s, strlen(s));
+			return;
 		case 'i':
 			twi_data[0] = SFDF_IDENTIFY;
-			twi_readwrite(0x80, TW_WRITE, 1);
-			if (twi_wait() != TWI_STATUS_SUCCESS) {
-				send_pstr(PSTR("error writing sfdio\n"));
-			}
-			twi_readwrite(0x80, TW_READ, 20);
-			if (twi_wait() != TWI_STATUS_SUCCESS) {
-				send_pstr(PSTR("error reading sfdio\n"));
+			d = twi_writeread(sla, 1, 20);
+			if (d < 0) {
+				send_pstr(PSTR("error identifying\n"));
 			} else {
 				sprintf(s, "identify: %s\n", twi_data);
 				send_str(s, strlen(s));
-				for (uint8_t i = 0; i < 20; i++) {
+				for (uint8_t i = 0; i < d; i++) {
 					sprintf(s, "%02x ", twi_data[i]);
 					send_str(s, strlen(s));
 				}
 				send_pstr(PSTR("\n"));
 			}
 			return;
-		case 't':
-			send_pstr(PSTR("LM75 set pointer=0\n"));
-			twi_data[0] = 0;
-			twi_readwrite(0x9e, TW_WRITE, 1);
-			if (twi_wait() != TWI_STATUS_SUCCESS) {
-				send_pstr(PSTR("error writing pointer\n"));
-				return;
-			}
-			send_pstr(PSTR("LM75 reading temp.\n"));
-			twi_readwrite(0x9e, TW_READ, 2);
-			if (twi_wait() != TWI_STATUS_SUCCESS) {
-				send_pstr(PSTR("error reading temp\n"));
-			} else {
-				sprintf(s, "temp = %d\n", twi_data[0]);
-				send_str(s, strlen(s));
-			}
-			send_pstr(PSTR("\nTWI test done.\n"));
-			return;
-		case 'r':
-			send_pstr(PSTR("read sfdio.\n"));
-			twi_data[0] = SFDF_BYTE;
-			twi_readwrite(0x80, TW_WRITE, 1);
+		case 's':
+			twi_data[0] = TWIBOOT_STATUS;
+			twi_xfer(sla, TW_WRITE, 1);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error writing sfdio\n"));
 			}
-			twi_readwrite(0x80, TW_READ, 1);
+			twi_xfer(sla, TW_READ, 1);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error reading sfdio\n"));
 			} else {
-				sprintf(s, "sfdio = %d\n", twi_data[0]);
+				sprintf(s, "status = 0x%02x\n", twi_data[0]);
 				send_str(s, strlen(s));
 			}
-			send_pstr(PSTR("\nread sfdio done.\n"));
+			return;
+		case 'e':
+			if (num < 3) {
+				send_pstr(PSTR("error: format is exx\n"));
+				return;
+			}
+			d = hexbyte(buf+1);
+			if (d < 0) {
+				send_pstr(PSTR("error: illegal hex addr\n"));
+				return;
+			}
+			twi_data[0] = TWIBOOT_EEPROM;
+			twi_data[1] = d;
+			if (num > 3) {
+				if (buf[3] != '=' || num != 6) {
+					send_pstr(PSTR("error: format us exx=xx\n"));
+					return;
+				}
+				d = hexbyte(buf+4);
+				if (d < 0) {
+					send_pstr(PSTR("error: illegal hex value\n"));
+					return;
+				}
+				twi_data[2] = d;
+				d = twi_writeread(sla, 3, 1);
+			} else {
+				d = twi_writeread(sla, 2, 1);
+			}
+			if (d < 0) {
+				send_pstr(PSTR("error reading eeprom\n"));
+			} else {
+				sprintf(s, "eeprom: %02x\n", twi_data[0]);
+				send_str(s, strlen(s));
+			}
+			return;
+		case 'f':
+			if (num < 3) {
+				send_pstr(PSTR("error: format is fxx\n"));
+				return;
+			}
+			d = hexbyte(buf+1);
+			if (d < 0) {
+				send_pstr(PSTR("error: illegal hex addr\n"));
+				return;
+			}
+			twi_data[0] = TWIBOOT_FLASH;
+			twi_data[1] = d;
+			d = twi_writeread(sla, 2, 64);
+			if (d < 0) {
+				send_pstr(PSTR("error reading flash\n"));
+			} else {
+				sprintf(s, "flash: ");
+				send_str(s, strlen(s));
+				for (uint8_t i = 0; i < 64; i++) {
+					sprintf(s, "%02x ", twi_data[i]);
+					send_str(s, strlen(s));
+					if (i % 16 == 15)
+						send_pstr(PSTR("\n       "));
+				}
+				send_pstr(PSTR("\n"));
+			}
+			return;
+		case 'F':
+			if (num < 3) {
+				send_pstr(PSTR("error: format is fxx\n"));
+				return;
+			}
+			d = hexbyte(buf+1);
+			if (d < 0) {
+				send_pstr(PSTR("error: illegal hex addr\n"));
+				return;
+			}
+			twi_data[0] = TWIBOOT_FLASH;
+			twi_data[1] = d;
+			for (uint8_t i = 2; i < 64+2; i++) {
+				twi_data[i] = i;
+			}
+			twi_xfer(sla, TW_WRITE, 64+2);
+			if (twi_wait() != TWI_STATUS_SUCCESS)
+				send_pstr(PSTR("error writing flash\n"));
 			return;
 		case 'u':
 			twi_data[0] = SFDF_BYTE;
-			twi_readwrite(0x80, TW_WRITE, 1);
+			twi_xfer(sla, TW_WRITE, 1);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error writing sfdio\n"));
 			}
 			send_pstr(PSTR("update sfdio.\n"));
-			twi_readwrite(0x80, TW_READ, 1);
+			twi_xfer(sla, TW_READ, 1);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error reading sfdio\n"));
 			} else {
@@ -270,11 +377,29 @@ parse_and_execute_command(const char *buf, uint8_t num)
 			}
 			twi_data[1] = twi_data[0] + 1;
 			twi_data[0] = SFDF_BYTE;
-			twi_readwrite(0x80, TW_WRITE, 2);
+			twi_xfer(sla, TW_WRITE, 2);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error writing sfdio\n"));
 			}
 			send_pstr(PSTR("\nupdate sfdio done.\n"));
+			return;
+		case 't':
+			send_pstr(PSTR("LM75 set pointer=0\n"));
+			twi_data[0] = 0;
+			twi_xfer(0x9e, TW_WRITE, 1);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error writing pointer\n"));
+				return;
+			}
+			send_pstr(PSTR("LM75 reading temp.\n"));
+			twi_xfer(0x9e, TW_READ, 2);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error reading temp\n"));
+			} else {
+				sprintf(s, "temp = %d\n", twi_data[0]);
+				send_str(s, strlen(s));
+			}
+			send_pstr(PSTR("\nTWI test done.\n"));
 			return;
 		}
 	}
