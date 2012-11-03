@@ -3,6 +3,6 @@
  */
 
 typedef enum {
-	SFDF_IDENTIFY,
-	SFDF_BYTE
+	SFDF_IDENTIFY = 0,
+	SFDF_BYTE,
 } sfd_function;

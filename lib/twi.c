@@ -37,6 +37,7 @@
 #define F_SCL	(100*1000L)
 #define TWPS	(0)
 #define F_TWPS	(1 << (TWPS*2))
+#define TWI_TIMEOUT (255)
 
 volatile twi_status_t _twi_status;
 volatile uint8_t _twi_sla;
@@ -46,7 +47,7 @@ volatile uint8_t _twi_twsr;
 volatile uint8_t _twi_timeout;
 volatile uint8_t _twi_function;
 
-volatile uint8_t twi_data[64]; // falsh page size
+volatile uint8_t twi_data[64]; // flash page size
 
 #if defined(TWI_DEBUG)
 #define TW_DEBUG(x) _twi_debug(PSTR(x));
@@ -140,13 +141,14 @@ ISR(TWI_vect)
 		case TW_SR_GCALL_ACK:
 			_twi_dsz = sizeof(twi_data);
 			_twi_idx = 0;
-			_twi_timeout = 255;
+			_twi_timeout = TWI_TIMEOUT;
 			_twi_transfer();
 			_twi_status = TWI_STATUS_START;
 			break;
 		case TW_ST_SLA_ACK:
 			_twi_dsz = twi_slave_write(_twi_function);
 			_twi_idx = 0;
+			_twi_timeout = TWI_TIMEOUT;
 			TWDR = twi_data[_twi_idx++];
 			_twi_transfer_next();
 			_twi_status = TWI_STATUS_WAITDATA;
@@ -242,7 +244,7 @@ ISR(TWI_vect)
 			_twi_status = TWI_STATUS_SUCCESS;
 			_twi_timeout = 0;
 			TWCR = TWCR_DFLT | _BV(TWEA);
-			twi_slave_read(_twi_function, _twi_idx+1);
+			twi_slave_read(_twi_function, _twi_idx);
 			break;
 		case TW_ST_DATA_ACK:
 			if (_twi_idx < _twi_dsz) {
@@ -323,7 +325,7 @@ twi_readwrite(uint8_t sla, uint8_t readwrite, uint16_t size)
 		_twi_dsz = size;
 		_twi_idx = 0;
 		_twi_sla = (sla & (~TW_READ)) | readwrite;
-		_twi_timeout = 255;
+		_twi_timeout = TWI_TIMEOUT;
 		_twi_status = TWI_STATUS_START;
 		_twi_start();
 	}	

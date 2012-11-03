@@ -240,6 +240,11 @@ parse_and_execute_command(const char *buf, uint8_t num)
 			return;
 		case 'r':
 			send_pstr(PSTR("read sfdio.\n"));
+			twi_data[0] = SFDF_BYTE;
+			twi_readwrite(0x80, TW_WRITE, 1);
+			if (twi_wait() != TWI_STATUS_SUCCESS) {
+				send_pstr(PSTR("error writing sfdio\n"));
+			}
 			twi_readwrite(0x80, TW_READ, 1);
 			if (twi_wait() != TWI_STATUS_SUCCESS) {
 				send_pstr(PSTR("error reading sfdio\n"));
